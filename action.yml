@@ -1,0 +1,40 @@
+name: 'Release Sync'
+description: 'Sync release assets between GitHub Release and Gitee Release'
+author: 'YuZhiYuanOrg'
+branding:
+  icon: 'upload-cloud'
+  color: 'blue'
+
+inputs:
+  gitee_token:
+    description: 'Gitee personal access token (requires repo permission)'
+    required: true
+  gitee_owner:
+    description: 'Gitee repository owner (username/organization name)'
+    required: true
+  gitee_repo:
+    description: 'Gitee repository name'
+    required: true
+  tag_name:
+    description: 'Release tag name (e.g., v1.0.0)'
+    required: true
+    default: ${{ github.ref_name }}
+  release_name:
+    description: 'Release name'
+    required: true
+    default: ${{ github.ref_name }}
+  body:
+    description: 'Release description content'
+    required: false
+    default: 'Auto release by GitHub Action'
+  files:
+    description: 'Path to files to upload (supports wildcards, e.g., dist/*)'
+    required: true
+  github_token:
+    description: 'GitHub personal access token'
+    required: false
+    default: ${{ github.token }}
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
