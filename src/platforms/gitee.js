@@ -1,7 +1,7 @@
-const core = require('@actions/core');
 const axios = require('axios');
 const FormData = require('form-data');
-const { getFileInfo } = require('../utils/fileHandler');
+const fs = require('fs');
+const path = require('path');
 
 /**
  * Gitee Release发布方法（基于Gitee Open API）
@@ -12,82 +12,164 @@ const { getFileInfo } = require('../utils/fileHandler');
  * @param {string} params.tag 标签名（如v1.0.0）
  * @param {string} params.releaseName Release名称
  * @param {string} params.body Release描述内容
- * @param {boolean} params.draft 是否草稿
+ * @param {boolean} params.prerelease 是否为预览版本
+ * @param {string} params.targetCommitish 分支名称或commit SHA，默认master分支
  * @param {Array<string>} params.assetFiles 资产文件绝对路径数组
  */
 async function publishGiteeRelease({
-  token,
-  owner,
-  repo,
-  tag,
-  releaseName,
-  body,
-  draft = false,
-  assetFiles = []
+    token,
+    owner,
+    repo,
+    tag,
+    releaseName,
+    body,
+    prerelease,
+    targetCommitish = "master",
+    assetFiles
 }) {
-  try {
-    core.info('开始发布Gitee Release...');
-    const baseUrl = `https://gitee.com/api/v5/repos/${owner}/${repo}`;
-    const headers = { Authorization: `token ${token}` };
+    try {
+        const baseUrl = `https://gitee.com/api/v5/repos/${owner}/${repo}`;
 
-    // 1. 检查标签是否存在
-    await axios.get(`${baseUrl}/tags/${tag}`, { headers });
+        // 1. 检查标签是否存在，不存在则创建
+        try {
+            await axios.get(`${baseUrl}/tags/${tag}`, {
+                params: { access_token: token },
+                timeout: 30000,
+                headers: {
+                    'User-Agent': 'Release Sync'
+                }
+            });
+        } catch (error) {
+            if (error.response && error.response.status === 404) {
+                // 准备创建标签的参数
+                const tagData = new FormData();
+                tagData.append('access_token', token);
+                tagData.append('tag_name', tag);
+                tagData.append('refs', targetCommitish);
 
-    // 2. 创建Gitee Release
-    const releaseResponse = await axios.post(
-      `${baseUrl}/releases`,
-      {
-        tag_name: tag,
-        name: releaseName,
-        body,
-        draft
-      },
-      {
-        headers: {
-          ...headers,
-          'Content-Type': 'application/json'
+                // 创建标签的请求头
+                const tagHeaders = {
+                    ...tagData.getHeaders(),
+                    'User-Agent': 'Release Sync',
+                    'Accept': 'application/json'
+                };
+
+                // 发送创建标签请求
+                await axios.post(
+                    `${baseUrl}/tags`,
+                    tagData,
+                    {
+                        headers: tagHeaders,
+                        maxContentLength: Infinity,
+                        maxBodyLength: Infinity,
+                        timeout: 60000
+                    }
+                );
+            } else {
+                throw error;
+            }
         }
-      }
-    );
-    const releaseId = releaseResponse.data.id;
-    core.info(`Gitee Release创建成功：${releaseResponse.data.html_url}`);
 
-    // 3. 上传资产文件（如果有，Gitee需要先获取上传地址，再提交文件）
-    if (assetFiles.length > 0) {
-      core.info(`开始上传${assetFiles.length}个Gitee Release资产文件...`);
-      for (const filePath of assetFiles) {
-        const fileInfo = await getFileInfo(filePath);
-        if (!fileInfo) continue;
-
-        // 3.1 获取Gitee资产上传地址
-        const uploadUrlResponse = await axios.post(
-          `${baseUrl}/releases/${releaseId}/assets/upload`,
-          { name: fileInfo.name },
-          { headers }
-        );
-        const uploadUrl = uploadUrlResponse.data.upload_url;
-
-        // 3.2 提交文件到上传地址（Gitee要求multipart/form-data格式）
+        // 2. 创建Gitee Release
         const formData = new FormData();
-        formData.append('file', fileInfo.content, {
-          filename: fileInfo.name,
-          knownLength: fileInfo.size
-        });
+        formData.append('tag_name', tag);
+        formData.append('name', releaseName);
+        formData.append('body', body);
+        formData.append('prerelease', prerelease.toString());
+        formData.append('target_commitish', targetCommitish);
 
-        await axios.post(uploadUrl, formData, {
-          headers: formData.getHeaders(),
-          maxContentLength: Infinity,
-          maxBodyLength: Infinity
-        });
-        core.info(`Gitee资产文件上传成功：${fileInfo.name}`);
-      }
+        // 构建请求头
+        const headers = {
+            ...formData.getHeaders(),
+            'User-Agent': 'Release Sync',
+            'Accept': 'application/json'
+        };
+
+        // 发送创建Release请求
+        const releaseUrl = `${baseUrl}/releases?access_token=${encodeURIComponent(token)}`;
+        await axios.post(
+            releaseUrl,
+            formData,
+            {
+                headers: headers,
+                maxContentLength: Infinity,
+                maxBodyLength: Infinity,
+                timeout: 60000
+            }
+        );
+
+        // 3. 上传资产文件（如有）
+        if (assetFiles.length > 0) {
+            // 根据Tag名称获取Release ID
+            let releaseId;
+            const getReleaseResponse = await axios.get(
+                `${baseUrl}/releases/tags/${encodeURIComponent(tag)}`,
+                {
+                    params: { access_token: token },
+                    headers: {
+                        'User-Agent': 'Release Sync',
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 30000
+                }
+            );
+
+            if (getReleaseResponse.data && getReleaseResponse.data.id) {
+                releaseId = getReleaseResponse.data.id;
+            } else {
+                throw new Error('无法获取有效的Release ID');
+            }
+
+            // 批量上传资产文件
+            for (let i = 0; i < assetFiles.length; i++) {
+                const filePath = assetFiles[i];
+                
+                // 跳过不存在的文件
+                if (!fs.existsSync(filePath)) {
+                    continue;
+                }
+
+                // 读取文件信息和内容
+                const fileStats = fs.statSync(filePath);
+                const fileContent = fs.readFileSync(filePath);
+                const fileName = path.basename(filePath);
+
+                // 准备上传表单数据
+                const uploadFormData = new FormData();
+                uploadFormData.append('access_token', token);
+                uploadFormData.append('file', fileContent, {
+                    filename: fileName,
+                    knownLength: fileStats.size
+                });
+
+                // 构建上传请求头
+                const uploadHeaders = {
+                    ...uploadFormData.getHeaders(),
+                    'User-Agent': 'Release Sync',
+                    'Accept': 'application/json'
+                };
+
+                // 发送文件上传请求
+                try {
+                    await axios.post(
+                        `${baseUrl}/releases/${releaseId}/attach_files`,
+                        uploadFormData,
+                        {
+                            headers: uploadHeaders,
+                            maxContentLength: Infinity,
+                            maxBodyLength: Infinity,
+                            timeout: 300000
+                        }
+                    );
+                } catch (uploadError) {
+                    // 单个文件上传失败不中断整体流程，继续处理下一个文件
+                    continue;
+                }
+            }
+        }
+    } catch (error) {
+        throw error;
     }
-
-    return releaseResponse.data;
-  } catch (error) {
-    core.setFailed(`Gitee Release发布失败：${error.response?.data?.message || error.message}`);
-    throw error;
-  }
 }
 
 module.exports = { publishGiteeRelease };
