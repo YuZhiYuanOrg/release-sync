@@ -1,179 +1,90 @@
 const core = require('@actions/core');
-const github = require('@actions/github');
-const axios = require('axios');
-const fs = require('fs');
-const path = require('path');
-const glob = require('glob');
+const platforms = require('./platforms');
+const { resolveAssetFiles } = require('./utils/fileHandler');
 
-// 读取输入参数
-const getInputs = () => {
-  return {
-    giteeToken: core.getInput('gitee_token', { required: true }),
-    giteeOwner: core.getInput('gitee_owner', { required: true }),
-    giteeRepo: core.getInput('gitee_repo', { required: true }),
-    tagName: core.getInput('tag_name', { required: true }),
-    releaseName: core.getInput('release_name', { required: true }),
-    body: core.getInput('body'),
-    files: core.getInput('files', { required: true }),
-    githubToken: core.getInput('github_token')
-  };
-};
-
-// 1. 上传文件到GitHub Release
-const uploadToGitHub = async (inputs, files) => {
-  core.info('开始上传文件到GitHub Release...');
-  const octokit = github.getOctokit(inputs.githubToken);
-  const { owner, repo } = github.context.repo;
-
-  // 获取或创建GitHub Release
-  let release;
+async function main() {
   try {
-    release = await octokit.rest.repos.getReleaseByTag({
-      owner,
-      repo,
-      tag: inputs.tagName
-    });
-    core.info(`找到已存在的GitHub Release: ${release.data.id}`);
-  } catch (err) {
-    if (err.status === 404) {
-      release = await octokit.rest.repos.createRelease({
-        owner,
-        repo,
-        tag_name: inputs.tagName,
-        name: inputs.releaseName,
-        body: inputs.body,
-        draft: false,
-        prerelease: false
-      });
-      core.info(`创建新的GitHub Release: ${release.data.id}`);
-    } else {
-      throw new Error(`获取/创建GitHub Release失败: ${err.message}`);
-    }
-  }
-
-  // 上传文件
-  for (const file of files) {
-    const fileName = path.basename(file);
-    const fileContent = fs.readFileSync(file);
-    core.info(`上传文件到GitHub: ${fileName}`);
+    // ========== 1. 读取Action输入参数 ==========
+    // 要同步的平台（逗号分隔，如github,gitee 或仅github）
+    const syncPlatforms = core.getInput('sync-platforms', { required: true })
+      .split(',')
+      .map(item => item.trim().toLowerCase())
+      .filter(Boolean); // 过滤空值
     
-    await octokit.rest.repos.uploadReleaseAsset({
-      owner,
-      repo,
-      release_id: release.data.id,
-      name: fileName,
-      data: fileContent
-    });
-  }
-  core.info('GitHub Release上传完成');
-};
+    // 通用Release配置
+    const tag = core.getInput('tag', { required: true });
+    const releaseName = core.getInput('release-name', { required: true });
+    const body = core.getInput('release-body', { required: false }) || '';
+    const draft = core.getBooleanInput('draft', { required: false }) || false;
+    const prerelease = core.getBooleanInput('prerelease', { required: false }) || false;
+    // 新增：解析资产文件
+    const assetInput = core.getInput('asset-files', { required: false });
+    const assetFiles = resolveAssetFiles(assetInput);
 
-// 2. 上传文件到Gitee Release
-const uploadToGitee = async (inputs, files) => {
-  core.info('开始上传文件到Gitee Release...');
-  const giteeApi = 'https://gitee.com/api/v5';
-  const headers = {
-    'Authorization': `token ${inputs.giteeToken}`,
-    'Content-Type': 'application/json'
-  };
+    // 各平台专属配置
+    const githubToken = core.getInput('github-token', { required: false });
+    const giteeToken = core.getInput('gitee-token', { required: false });
+    const giteeOwner = core.getInput('gitee-owner', { required: false });
+    const giteeRepo = core.getInput('gitee-repo', { required: false });
 
-  // 步骤1: 获取Gitee仓库的tag（确保tag存在）
-  try {
-    await axios.get(`${giteeApi}/repos/${inputs.giteeOwner}/${inputs.giteeRepo}/tags/${inputs.tagName}`, { headers });
-    core.info(`找到Gitee tag: ${inputs.tagName}`);
-  } catch (err) {
-    if (err.response?.status === 404) {
-      throw new Error(`Gitee仓库不存在tag ${inputs.tagName}，请先推送tag到Gitee`);
-    } else {
-      throw new Error(`检查Gitee tag失败: ${err.message}`);
-    }
-  }
-
-  // 步骤2: 获取或创建Gitee Release
-  let releaseId;
-  try {
-    const res = await axios.get(`${giteeApi}/repos/${inputs.giteeOwner}/${inputs.giteeRepo}/releases`, { headers });
-    const existingRelease = res.data.find(item => item.tag_name === inputs.tagName);
-    if (existingRelease) {
-      releaseId = existingRelease.id;
-      core.info(`找到已存在的Gitee Release: ${releaseId}`);
-    } else {
-      const createRes = await axios.post(
-        `${giteeApi}/repos/${inputs.giteeOwner}/${inputs.giteeRepo}/releases`,
-        {
-          tag_name: inputs.tagName,
-          name: inputs.releaseName,
-          body: inputs.body,
-          draft: false,
-          prerelease: false
-        },
-        { headers }
-      );
-      releaseId = createRes.data.id;
-      core.info(`创建新的Gitee Release: ${releaseId}`);
-    }
-  } catch (err) {
-    throw new Error(`获取/创建Gitee Release失败: ${err.message}`);
-  }
-
-  // 步骤3: 上传文件到Gitee Release
-  for (const file of files) {
-    const fileName = path.basename(file);
-    core.info(`上传文件到Gitee: ${fileName}`);
-
-    // 第一步：获取上传凭证
-    const uploadRes = await axios.post(
-      `${giteeApi}/repos/${inputs.giteeOwner}/${inputs.giteeRepo}/releases/${releaseId}/assets/pre_upload`,
-      { name: fileName },
-      { headers }
-    );
-    const uploadUrl = uploadRes.data.upload_url;
-    const assetId = uploadRes.data.id;
-
-    // 第二步：上传文件（form-data格式）
-    const fileContent = fs.readFileSync(file);
-    await axios.post(
-      uploadUrl,
-      { file: fileContent },
-      {
-        headers: {
-          'Content-Type': 'multipart/form-data'
-        }
+    // ========== 2. 验证平台配置 ==========
+    for (const platform of syncPlatforms) {
+      if (!platforms[platform]) {
+        core.setFailed(`不支持的平台：${platform}，请检查sync-platforms输入`);
+        return;
       }
-    );
-
-    // 第三步：确认上传
-    await axios.post(
-      `${giteeApi}/repos/${inputs.giteeOwner}/${inputs.giteeRepo}/releases/${releaseId}/assets/${assetId}/confirm`,
-      {},
-      { headers }
-    );
-  }
-  core.info('Gitee Release上传完成');
-};
-
-// 主函数
-const run = async () => {
-  try {
-    const inputs = getInputs();
-    
-    // 解析文件路径（支持通配符）
-    const files = glob.sync(inputs.files);
-    if (files.length === 0) {
-      throw new Error(`未找到匹配的文件: ${inputs.files}`);
+      // 验证对应平台的必填配置
+      if (platform === 'github' && !githubToken) {
+        core.setFailed('同步GitHub时，必须提供github-token参数');
+        return;
+      }
+      if (platform === 'gitee' && (!giteeToken || !giteeOwner || !giteeRepo)) {
+        core.setFailed('同步Gitee时，必须提供gitee-token、gitee-owner、gitee-repo参数');
+        return;
+      }
     }
-    core.info(`找到待上传文件: ${files.join(', ')}`);
 
-    // 上传到GitHub Release
-    await uploadToGitHub(inputs, files);
+    // ========== 3. 按平台执行发布 ==========
+    for (const platform of syncPlatforms) {
+      core.info(`开始处理平台：${platform}`);
+      switch (platform) {
+        case 'github':
+          await platforms.github({
+            token: githubToken,
+            tag,
+            releaseName,
+            body,
+            draft,
+            prerelease,
+            assetFiles // 传递资产文件
+          });
+          break;
+        case 'gitee':
+          await platforms.gitee({
+            token: giteeToken,
+            owner: giteeOwner,
+            repo: giteeRepo,
+            tag,
+            releaseName,
+            body,
+            draft,
+            assetFiles // 传递资产文件
+          });
+          break;
+        // 扩展新平台：新增case即可（如gitlab）
+        // case 'gitlab':
+        //   await platforms.gitlab({...});
+        //   break;
+        default:
+          core.warning(`跳过未实现的平台：${platform}`);
+      }
+    }
 
-    // 上传到Gitee Release
-    await uploadToGitee(inputs, files);
-
-    core.info('所有文件上传完成！');
+    core.info('所有指定平台的Release同步（含资产文件）完成！');
   } catch (error) {
-    core.setFailed(`执行失败: ${error.message}`);
+    core.setFailed(`Release同步失败：${error.message}`);
   }
-};
+}
 
-run();
+// 执行主流程
+main();
