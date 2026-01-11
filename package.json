@@ -1,7 +1,7 @@
 {
   "name": "release-sync",
   "version": "1.0.0",
-  "description": "A lightweight and reliable GitHub Action to synchronize release assets between GitHub Release and Gitee Release. This action automates the process of uploading your build artifacts to both platforms with minimal configuration.",
+  "description": "A lightweight and reliable GitHub Action to synchronize release assets between GitHub Release and Gitee Release.",
   "main": "src/index.js",
   "scripts": {
     "build": "ncc build src/index.js -o dist",

@@ -1,6 +1,7 @@
-# Release Sync Action
+# Release Sync
 
-A lightweight and reliable GitHub Action to synchronize release assets between GitHub Release and Gitee Release. This action automates the process of uploading your build artifacts to both platforms with minimal configuration.
+A lightweight and reliable GitHub Action to synchronize release assets between GitHub Release and Gitee Release.
+This action automates the process of uploading your build artifacts to both platforms with minimal configuration.
 
 ## 🚀 Key Features
 - **Dual Platform Support**: Upload release assets to both GitHub Release and Gitee Release in one workflow
